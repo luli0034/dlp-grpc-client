@@ -1,0 +1,217 @@
+syntax = "proto3";
+
+package privacy.dlpcontainer;
+
+option java_package = "com.google.privacy.dlpcontainer";
+option java_multiple_files = true;
+
+// Categorization of results based on how likely they are to represent a match.
+enum Likelihood {
+  // Default value; information with all likelihoods is included.
+  LIKELIHOOD_UNSPECIFIED = 0;
+  VERY_UNLIKELY = 1;
+  UNLIKELY = 2;
+  POSSIBLE = 3;
+  LIKELY = 4;
+  VERY_LIKELY = 5;
+}
+
+// One classified finding of sensitive information.
+message Finding {
+  InfoType info_type = 1;
+  int64 byte_offset = 2;
+  int64 byte_length = 3;
+  Likelihood likelihood = 6;
+  string quote = 7;
+}
+
+// Call context, including the API key and other configuration information.
+message Context {
+  string api_key = 1;
+}
+
+// Type of information detected by the API.
+message InfoType {
+  string name = 1;
+}
+
+// Configuration for Inspect operations (such as InspectContent).
+message InspectConfig {
+  repeated InfoType info_types = 1;
+  // Only returns findings equal or above this threshold.
+  // Default value is LIKELIHOOD_UNSPECIFIED which accepts any likelihood.
+  Likelihood min_likelihood = 2;
+  repeated CustomInfoType custom_info_types = 6;
+}
+
+// Custom information type provided by the user. Used to find domain-specific
+// sensitive information configurable to the data in question.
+message CustomInfoType {
+  // Message defining a custom regular expression.
+  message Regex {
+    // Pattern defining the regular expression. Its syntax
+    // (https://github.com/google/re2/wiki/Syntax) can be found under the
+    // google/re2 repository on GitHub.
+    string pattern = 1;
+    // The index of the submatch to extract as findings. When not
+    // specified, the entire match is returned. No more than 3 may be included.
+    repeated int32 group_indexes = 2;
+  }
+
+  // CustomInfoType can either be a new infoType, or an extension of built-in
+  // infoType, when the name matches one of existing infoTypes and that infoType
+  // is specified in `InspectContent.info_types` field. Specifying the latter
+  // adds findings to the one detected by the system. If built-in info type is
+  // not specified in `InspectContent.info_types` list then the name is treated
+  // as a custom info type.
+  InfoType info_type = 1;
+
+  // Likelihood to return for this CustomInfoType. This base value can be
+  // altered by a detection rule if the finding meets the criteria specified by
+  // the rule. Defaults to `VERY_LIKELY` if not specified.
+  Likelihood likelihood = 6;
+
+  oneof type {
+    // Regular expression based CustomInfoType.
+    Regex regex = 3;
+  }
+}
+
+// Container for bytes to inspect or redact.
+message ByteContentItem {
+  // The type of data being sent for inspection.
+  enum BytesType {
+    // Unused
+    BYTES_TYPE_UNSPECIFIED = 0;
+    // plain text
+    TEXT_UTF8 = 5;
+  }
+  // The type of data stored in the bytes string. Default will be TEXT_UTF8.
+  BytesType type = 1;
+  // Content data to inspect or redact.
+  bytes data = 2;
+}
+
+// Content to inspect.
+message ContentItem {
+  oneof data_item {
+    string value = 3;
+    ByteContentItem byte_item = 5;
+  }
+}
+
+message InspectContentRequest {
+  Context context = 1;
+  InspectConfig inspect_config = 2;
+  ContentItem item = 3;
+}
+
+message InspectContentResponse {
+  repeated Finding findings = 1;
+}
+
+message ListInfoTypesRequest {}
+
+message ListInfoTypesResponse {
+  repeated InfoType info_types = 1;
+}
+
+message PrimitiveTransformation {
+  oneof transformation {
+    // Replace with a specified value.
+    ReplaceValueConfig replace_config = 1;
+
+    // Replace with infotype
+    ReplaceWithInfoTypeConfig replace_with_info_type_config = 7;
+  }
+}
+
+// Replace each matching finding with the name of the info_type.
+message ReplaceWithInfoTypeConfig {}
+
+// Replace each input value with a given `Value`.
+message ReplaceValueConfig {
+  // Value to replace it with.
+  Value new_value = 1;
+}
+
+// Set of primitive values supported by the system.
+// Note that for the purposes of inspection or transformation, the number
+// of bytes considered to comprise a 'Value' is based on its representation
+// as a UTF-8 encoded string. For example, if 'integer_value' is set to
+// 123456789, the number of bytes would be counted as 9, even though an
+// int64 only holds up to 8 bytes of data.
+message Value {
+  // Value types
+  oneof type {
+    // integer
+    int64 integer_value = 1;
+
+    // float
+    double float_value = 2;
+
+    // string
+    string string_value = 3;
+
+    // boolean
+    bool boolean_value = 4;
+  }
+}
+
+message InfoTypeTransformations {
+  // A transformation to apply to text that is identified as a specific
+  // info_type.
+  message InfoTypeTransformation {
+    // InfoTypes to apply the transformation to. An empty list will cause
+    // this transformation to apply to all findings that correspond to
+    // infoTypes that were requested in `InspectConfig`.
+    // A special "ALL_TEXT" infotype will tokenize the whole content item.
+    // Only one ALL_TEXT transformation is allowed per request and it only
+    // supports tokenization of text and bytes. InspectConfig is ignored
+    // in such tokenization requests.
+    repeated InfoType info_types = 1;
+    // Primitive transformation to apply to the infoType.
+    PrimitiveTransformation primitive_transformation = 2;
+  }
+  // Transformation for each infoType. Cannot specify more than one
+  // for a given infoType.
+  repeated InfoTypeTransformation transformations = 1;
+}
+
+message DeidentifyConfig {
+  oneof transformation {
+    // Treat the dataset as free-form text and apply the same free text
+    // transformation everywhere.
+    InfoTypeTransformations info_type_transformations = 1;
+  }
+}
+
+message DeidentifyContentRequest {
+  // Configuration for the de-identification of the content item.
+  DeidentifyConfig deidentify_config = 2;
+  // Configuration for the inspection of the content item.
+  InspectConfig inspect_config = 3;
+  // The item to de-identify. Will be treated as text.
+  ContentItem item = 4;
+}
+
+message DeidentifyContentResponse {
+  // The de-identified item.
+  ContentItem item = 1;
+}
+
+// A service that detects and classifies sensitive information.
+service DlpService {
+  // Classifies sensitive information in a content item.
+  rpc InspectContent(InspectContentRequest) returns (InspectContentResponse);
+  // Classifies sensitive informaation in a stream and returns a stream of
+  // findings. Changes to InspectConfig after the first call are ignored.
+  rpc InspectContentStream(stream InspectContentRequest)
+      returns (stream InspectContentResponse);
+  // Returns the list of supported infotypes.
+  rpc ListInfoTypes(ListInfoTypesRequest) returns (ListInfoTypesResponse);
+  // Replaces sensitive information with a deidentified or otherwise
+  // sanitized verion.
+  rpc DeidentifyContent(DeidentifyContentRequest)
+      returns (DeidentifyContentResponse);
+}
